@@ -7,250 +7,379 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup  # مك�
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes  # معالجات تيليجرام
 from notion_client import Client  # مكتبة للتعامل مع Notion API
 import json  # للتعامل مع بيانات JSON
+import io
 
-# إعداد التسجيل (Logging)
+# إعداد السجلات
+import sys
+import io
+
+# إعداد الترميز للمخرجات
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 logging.basicConfig(
-    level=logging.INFO,  # مستوى التسجيل: معلومات
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # تنسيق رسائل التسجيل
-    handlers=[
-        logging.StreamHandler(sys.stdout)  # عرض السجلات في الطرفية
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    stream=sys.stdout
 )
-logger = logging.getLogger(__name__)  # إنشاء مسجل خاص بهذا الملف
+logger = logging.getLogger(__name__)
 
-# تحميل المتغيرات البيئية من ملف .env
-logger.info("جاري تحميل المتغيرات البيئية...")
+# تعيين مستوى التسجيل للمكتبات الأخرى
+logging.getLogger('httpx').setLevel(logging.INFO)
+logging.getLogger('telegram').setLevel(logging.INFO)
+
+# تحميل المتغيرات البيئية
 load_dotenv()
 
-# تهيئة عميل Notion
-token = os.getenv("NOTION_TOKEN")  # الحصول على توكن Notion من المتغيرات البيئية
-logger.info(f"Notion token: {token[:4]}...{token[-4:]}")  # طباعة جزء من التوكن للتأكد من تحميله
-notion = Client(auth=token)  # إنشاء عميل Notion
+logger.info("جاري تحميل المتغيرات البيئية...")
 
-# تخزين اختيارات المستخدمين للصفحات
-# user_id -> [page_id1, page_id2, ...]
-user_pages = {}
+# الحصول على التوكن من المتغيرات البيئية
+notion_token = os.getenv("NOTION_TOKEN")
+if not notion_token:
+    logger.error("لم يتم العثور على NOTION_TOKEN في ملف .env")
+    sys.exit(1)
+    
+logger.info(f"Notion token: {notion_token[:4]}...{notion_token[-4:]}")
+
+# إنشاء عميل Notion
+try:
+    notion = Client(auth=notion_token)
+    # اختبار الاتصال
+    notion.users.me()
+    logger.info("تم الاتصال بـ Notion بنجاح")
+except Exception as e:
+    logger.error(f"فشل الاتصال بـ Notion: {str(e)}")
+    sys.exit(1)
+
+# قاموس لتخزين الصفحات المرتبطة بكل توبيك
+topic_pages = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    معالج أمر /start
-    يقوم بعرض قائمة الصفحات المتاحة في Notion للمستخدم
-    
-    المعاملات:
-        update (Update): تحديث من تيليجرام يحتوي على معلومات الرسالة والمستخدم
-        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    معالج أمر /start - يستخدم لربط التوبيك بصفحة Notion
     """
     try:
-        logger.info("بدء البحث عن الصفحات في Notion...")
+        message = update.message
+        logger.info(f"تم استلام أمر start من المستخدم {message.from_user.id}")
         
-        # البحث عن جميع الصفحات في Notion
-        # ترتيب النتائج حسب آخر تعديل
-        response = notion.search(
-            query="",  # بحث بدون كلمات مفتاحية
-            sort={
-                "direction": "ascending",  # ترتيب تصاعدي
-                "timestamp": "last_edited_time"  # حسب وقت آخر تعديل
-            }
-        )
-        
-        # استخراج الصفحات من النتيجة
-        pages = response.get("results", [])
-        logger.info(f"تم العثور على {len(pages)} صفحة")
-        
-        # طباعة معلومات كل صفحة في السجلات للتشخيص
-        for page in pages:
-            logger.info(f"معلومات الصفحة: {page.get('id')} - {page.get('url')} - {page.get('object')}")
-        
-        # إنشاء لوحة مفاتيح تفاعلية مع أزرار للصفحات
-        keyboard = []
-        for page in pages:
-            try:
-                # تجاهل أي شيء ليس صفحة (مثل قواعد البيانات)
-                if page.get("object") != "page":
-                    continue
+        # التحقق من أن الرسالة في مجموعة وفي توبيك
+        if not message.chat.is_forum:
+            logger.info("المجموعة لا تدعم التوبيكات")
+            await message.reply_text("عذراً، هذا الأمر يعمل فقط في المجموعات التي تدعم التوبيكات.")
+            return
+            
+        if not message.is_topic_message:
+            logger.info("الرسالة ليست في توبيك")
+            await message.reply_text("عذراً، يجب استخدام هذا الأمر داخل توبيك.")
+            return
+            
+        # التحقق من صلاحيات المستخدم
+        user = message.from_user
+        chat_member = await context.bot.get_chat_member(message.chat.id, user.id)
+        if not chat_member.status in ['creator', 'administrator']:
+            logger.info(f"المستخدم {user.id} ليس مشرفاً")
+            await message.reply_text("عذراً، هذا الأمر متاح فقط للمشرفين.")
+            return
+            
+        logger.info("جاري البحث عن صفحات Notion...")
+        try:
+            # البحث عن الصفحات في Notion
+            pages = notion.search(
+                **{
+                    "filter": {
+                        "value": "page",
+                        "property": "object"
+                    }
+                }
+            ).get("results", [])
+            
+            if not pages:
+                logger.info("لم يتم العثور على صفحات")
+                await message.reply_text("لم يتم العثور على صفحات في حساب Notion الخاص بك.")
+                return
+                
+            # إنشاء أزرار للصفحات
+            keyboard = []
+            for page in pages[:10]:  # نأخذ أول 10 صفحات فقط
+                try:
+                    # الحصول على عنوان الصفحة
+                    page_id = page["id"]
+                    page_title = None
                     
-                # الحصول على معلومات تفصيلية عن الصفحة
-                page_info = notion.pages.retrieve(page_id=page["id"])
-                logger.info(f"معلومات تفصيلية للصفحة: {page_info}")
-                
-                # محاولة الحصول على عنوان الصفحة
-                page_title = None
-                
-                # البحث عن العنوان في خصائص الصفحة
-                if "properties" in page_info:
-                    for prop_name, prop_value in page_info["properties"].items():
-                        if prop_value["type"] == "title":
-                            title_items = prop_value.get("title", [])
+                    # محاولة الحصول على العنوان من خصائص الصفحة
+                    if "properties" in page:
+                        title_property = page["properties"].get("title", {})
+                        if title_property and "title" in title_property:
+                            title_items = title_property["title"]
                             if title_items:
                                 page_title = title_items[0].get("plain_text", "")
-                                break
-
-                # إذا لم نجد عنواناً، نستخدم الرابط
-                if not page_title:
-                    page_title = page.get("url", "صفحة بدون عنوان").split("/")[-1]
-
-                # إضافة زر للصفحة في لوحة المفاتيح
-                page_id = page["id"]
-                logger.info(f"إضافة صفحة: {page_title} (ID: {page_id})")
-                keyboard.append([InlineKeyboardButton(page_title, callback_data=f"page_{page_id}")])
-            except Exception as e:
-                logger.error(f"خطأ في معالجة الصفحة: {str(e)}", exc_info=True)
-                continue
-
-        # إذا لم نجد أي صفحات، نعرض رسالة خطأ
-        if not keyboard:
-            error_msg = (
-                "لم يتم العثور على أي صفحات. تأكد من:\n"
-                "1. إضافة integration إلى الصفحات في Notion (Share -> Add connections -> TELEGRAM-BOT)\n"
-                "2. منح الصلاحيات المناسبة للـ integration\n"
-                "3. وجود صفحات في مساحة العمل الخاصة بك\n"
-                "4. أن الـ integration لديه صلاحية الوصول للصفحات"
+                    
+                    # إذا لم نجد العنوان، نستخدم عنواناً افتراضياً
+                    if not page_title:
+                        page_title = "صفحة بدون عنوان"
+                    
+                    logger.info(f"تمت إضافة صفحة: {page_title} (ID: {page_id})")
+                    callback_data = f"page_{message.message_thread_id}_{page_id}"
+                    keyboard.append([InlineKeyboardButton(page_title, callback_data=callback_data)])
+                    
+                except Exception as e:
+                    logger.error(f"خطأ في معالجة الصفحة {page.get('id', 'unknown')}: {str(e)}")
+                    continue
+                
+            if not keyboard:
+                logger.warning("لم يتم العثور على صفحات صالحة")
+                await message.reply_text(
+                    "لم يتم العثور على صفحات يمكن استخدامها.\n"
+                    "تأكد من:\n"
+                    "1. إضافة integration إلى الصفحات في Notion\n"
+                    "2. منح الصلاحيات المناسبة للـ integration"
+                )
+                return
+                
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                "اختر الصفحة التي تريد ربط هذا التوبيك بها:",
+                reply_markup=reply_markup
             )
-            logger.error(error_msg)
-            await update.message.reply_text(error_msg)
-            return
-
-        # إنشاء وإرسال لوحة المفاتيح التفاعلية
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "مرحباً! الرجاء اختيار الصفحات التي تريد الوصول إليها:",
-            reply_markup=reply_markup
-        )
+            logger.info(f"تم إرسال قائمة الصفحات للمستخدم {user.id}")
+            
+        except Exception as e:
+            logger.error(f"خطأ في البحث عن صفحات Notion: {str(e)}")
+            await message.reply_text("حدث خطأ أثناء البحث عن الصفحات. الرجاء المحاولة مرة أخرى.")
+            
     except Exception as e:
-        error_msg = (
-            f"حدث خطأ أثناء بدء البوت: {str(e)}\n"
-            "تأكد من:\n"
-            "1. صحة توكن Notion\n"
-            "2. إضافة integration إلى الصفحات (Share -> Add connections -> TELEGRAM-BOT)\n"
-            "3. منح الصلاحيات المناسبة"
-        )
-        logger.error(error_msg, exc_info=True)
-        await update.message.reply_text(error_msg)
+        logger.error(f"خطأ في معالجة أمر start: {str(e)}")
+        await update.message.reply_text("حدث خطأ غير متوقع. الرجاء المحاولة مرة أخرى.")
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    معالج الضغط على الأزرار في لوحة المفاتيح التفاعلية
-    يقوم بحفظ اختيار المستخدم للصفحة
-    
-    المعاملات:
-        update (Update): تحديث من تيليجرام يحتوي على معلومات الضغطة والمستخدم
-        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    معالج الأزرار - يستخدم لمعالجة اختيار الصفحة
     """
     try:
-        # الحصول على معلومات الضغطة
         query = update.callback_query
-        await query.answer()  # إرسال إشعار للمستخدم بأن الضغطة تم استلامها
+        await query.answer()
         
-        # استخراج معرف المستخدم ومعرف الصفحة
-        user_id = query.from_user.id
-        page_id = query.data.replace("page_", "")  # إزالة البادئة page_ من معرف الصفحة
+        # التحقق من صحة البيانات
+        if not query.data.startswith("page_"):
+            logger.error(f"بيانات غير صالحة: {query.data}")
+            await query.edit_message_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+            return
+            
+        # استخراج معرف التوبيك ومعرف الصفحة
+        _, topic_id, page_id = query.data.split("_")
+        topic_id = int(topic_id)
         
-        # إنشاء قائمة للمستخدم إذا لم تكن موجودة
-        if user_id not in user_pages:
-            user_pages[user_id] = []
+        # تخزين الربط بين التوبيك والصفحة
+        topic_pages[topic_id] = page_id
+        logger.info(f"تم ربط التوبيك {topic_id} بالصفحة {page_id}")
         
-        # إضافة الصفحة لقائمة المستخدم إذا لم تكن مضافة
-        if page_id not in user_pages[user_id]:
-            user_pages[user_id].append(page_id)
-            await query.edit_message_text(f"تم إضافة الصفحة إلى قائمة صفحاتك المتاحة!")
-        else:
-            await query.edit_message_text("هذه الصفحة مضافة مسبقاً!")
+        # تحديث الرسالة
+        await query.edit_message_text(f"تم ربط هذا التوبيك بالصفحة بنجاح! يمكنك الآن إرسال الرسائل وسيتم حفظها في Notion.")
+        
     except Exception as e:
-        logger.error(f"حدث خطأ في button: {str(e)}")
-        if query:
-            await query.edit_message_text("حدث خطأ أثناء معالجة الزر!")
+        logger.error(f"خطأ في معالجة الزر: {str(e)}")
+        await query.edit_message_text("حدث خطأ أثناء ربط الصفحة. الرجاء المحاولة مرة أخرى.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    معالج الرسائل النصية
-    يقوم بإضافة الرسالة إلى صفحات Notion المحددة
+    معالجة الرسائل الواردة من المستخدمين
     
-    المعاملات:
-        update (Update): تحديث من تيليجرام يحتوي على معلومات الرسالة والمستخدم
-        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    Args:
+        update (Update): تحديث تيليجرام الذي يحتوي على الرسالة
+        context (ContextTypes.DEFAULT_TYPE): سياق البوت
     """
     try:
-        # الحصول على معرف المستخدم ونص الرسالة
-        user_id = update.message.from_user.id
-        message_text = update.message.text
+        logger.info("تم استلام رسالة جديدة")
+        logger.info(f"نوع التحديث: {type(update)}")
+        logger.info(f"محتويات التحديث: {update.to_dict()}")
         
-        # التحقق من أن المستخدم قد اختار صفحات
-        if user_id not in user_pages or not user_pages[user_id]:
-            await update.message.reply_text("الرجاء اختيار صفحة أولاً باستخدام الأمر /start")
+        message = update.message
+        if not message:
+            logger.info("لا توجد رسالة في التحديث")
+            return
+            
+        logger.info(f"معلومات الرسالة: {message.to_dict()}")
+        
+        # التحقق من أن الرسالة من توبيك
+        is_topic_message = message.is_topic_message if hasattr(message, 'is_topic_message') else False
+        logger.info(f"هل الرسالة من توبيك؟ {is_topic_message}")
+        
+        if not is_topic_message:
+            logger.info("الرسالة ليست من توبيك")
             return
         
-        # إضافة الرسالة إلى كل الصفحات المحددة
-        for page_id in user_pages[user_id]:
+        # الحصول على معرف التوبيك
+        topic_id = message.message_thread_id
+        logger.info(f"معرف التوبيك: {topic_id}")
+        
+        # التحقق من وجود التوبيك في القاموس
+        if topic_id not in topic_pages:
+            logger.info("معرف التوبيك غير مرتبط بأي صفحة")
+            return
+            
+        logger.info(f"معرف التوبيك: {topic_id}")
+        logger.info(f"قائمة التوبيكات المرتبطة: {topic_pages}")
+        
+        # الحصول على معرف الصفحة المرتبطة بالتوبيك
+        page_id = topic_pages[topic_id]
+        logger.info(f"معرف الصفحة: {page_id}")
+        
+        # معالجة أنواع مختلفة من الرسائل
+        content = None
+        
+        if message.text:
+            # رسالة نصية
+            logger.info(f"رسالة نصية: {message.text}")
+            content = await create_text_block(message.text)
+            
+        elif message.photo:
+            # صورة
+            logger.info("رسالة صورة")
+            content = await create_media_block(message.photo[-1], "صورة", message.caption)
+                
+        elif message.video:
+            # فيديو
+            logger.info("رسالة فيديو")
+            content = await create_media_block(message.video, "فيديو", message.caption)
+                
+        elif message.voice:
+            # رسالة صوتية
+            logger.info("رسالة صوتية")
+            content = await create_media_block(message.voice, "رسالة صوتية")
+                
+        elif message.audio:
+            # ملف صوتي
+            logger.info("ملف صوتي")
+            title = message.audio.title if message.audio.title else "بدون عنوان"
+            performer = message.audio.performer if message.audio.performer else "غير معروف"
+            caption = f"العنوان: {title}\nالمؤدي: {performer}"
+            content = await create_media_block(message.audio, "ملف صوتي", caption)
+                
+        elif message.document:
+            # مستند
+            logger.info("مستند")
+            file_name = message.document.file_name if message.document.file_name else "بدون اسم"
+            content = await create_media_block(message.document, "مستند", f"اسم الملف: {file_name}")
+        
+        if content:
+            # إضافة المحتوى إلى Notion
+            logger.info("جاري إضافة المحتوى إلى Notion...")
             try:
-                # إضافة الرسالة كفقرات في الصفحة
+                # إضافة سطر فارغ قبل المحتوى
                 notion.blocks.children.append(
-                    block_id=page_id,
+                    page_id,
                     children=[
-                        # فقرة فارغة قبل الرسالة
                         {
                             "object": "block",
                             "type": "paragraph",
                             "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": ""}}]
+                                "rich_text": []
                             }
                         },
-                        # فقرة تحتوي على الرسالة
+                        content,
                         {
                             "object": "block",
                             "type": "paragraph",
                             "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": message_text}}]
-                            }
-                        },
-                        # فقرة فارغة بعد الرسالة
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": ""}}]
+                                "rich_text": []
                             }
                         }
                     ]
                 )
-                await update.message.reply_text("تمت إضافة رسالتك إلى Notion!")
+                logger.info("تم إضافة المحتوى بنجاح إلى Notion")
+                await message.reply_text("تم حفظ الرسالة في Notion بنجاح!")
             except Exception as e:
-                logger.error(f"حدث خطأ في إضافة الرسالة: {str(e)}")
-                await update.message.reply_text(f"حدث خطأ أثناء إضافة الرسالة: {str(e)}")
+                logger.error(f"خطأ في إضافة المحتوى إلى Notion: {str(e)}")
+                await message.reply_text("حدث خطأ أثناء حفظ الرسالة في Notion. الرجاء المحاولة مرة أخرى.")
+        else:
+            logger.warning("نوع الرسالة غير مدعوم")
+            await message.reply_text("عذراً، هذا النوع من الرسائل غير مدعوم حالياً.")
+            
     except Exception as e:
         logger.error(f"حدث خطأ في handle_message: {str(e)}")
-        await update.message.reply_text("حدث خطأ أثناء معالجة الرسالة!")
+        await message.reply_text("حدث خطأ غير متوقع. الرجاء المحاولة مرة أخرى.")
+
+async def create_text_block(text: str) -> dict:
+    """
+    إنشاء كتلة نص لـ Notion
+    
+    Args:
+        text (str): النص المراد إضافته
+        
+    Returns:
+        dict: كتلة Notion
+    """
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{
+                "type": "text",
+                "text": {
+                    "content": text
+                }
+            }]
+        }
+    }
+
+async def create_media_block(media_obj, media_type: str, caption: str = None) -> dict:
+    """
+    إنشاء كتلة وسائط لـ Notion
+    
+    Args:
+        media_obj: كائن الوسائط من تيليجرام
+        media_type (str): نوع الوسائط (صورة، فيديو، إلخ)
+        caption (str, optional): وصف الوسائط
+        
+    Returns:
+        dict: كتلة Notion
+    """
+    try:
+        file = await media_obj.get_file()
+        content = f"{media_type}: {file.file_path}"
+        if caption:
+            content += f"\n{caption}"
+            
+        return await create_text_block(content)
+    except Exception as e:
+        logger.error(f"خطأ في الحصول على رابط {media_type}: {str(e)}")
+        return None
 
 def main():
     """
     الدالة الرئيسية لتشغيل البوت
-    تقوم بتهيئة البوت وإضافة معالجات الأوامر وتشغيل البوت
     """
     try:
-        # الحصول على توكن البوت
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            raise ValueError("لم يتم العثور على توكن البوت! تأكد من ملف .env")
+        # الحصول على توكن البوت من المتغيرات البيئية
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not bot_token:
+            logger.error("لم يتم العثور على توكن البوت")
+            return
             
         # إنشاء تطبيق البوت
-        logger.info("جاري تهيئة البوت...")
-        application = Application.builder().token(token).build()
-        logger.info("تم تهيئة البوت بنجاح!")
-
-        # إضافة معالجات الأوامر
-        logger.info("جاري إضافة معالجات الأوامر...")
-        application.add_handler(CommandHandler("start", start))  # معالج أمر /start
-        application.add_handler(CallbackQueryHandler(button))  # معالج الضغط على الأزرار
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  # معالج الرسائل النصية
-        logger.info("تم إضافة معالجات الأوامر بنجاح!")
-
-        # تشغيل البوت
-        logger.info("جاري تشغيل البوت...")
+        application = Application.builder().token(bot_token).build()
+        
+        # إضافة معالج الأمر /start
+        application.add_handler(CommandHandler("start", start))
+        
+        # إضافة معالج الأزرار
+        application.add_handler(CallbackQueryHandler(button))
+        
+        # إضافة معالج الرسائل
+        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+        
+        # بدء تشغيل البوت
+        logger.info("جاري بدء تشغيل البوت...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info("تم تشغيل البوت بنجاح!")
+        
     except Exception as e:
         logger.error(f"حدث خطأ في main: {str(e)}")
-        raise e
 
 # نقطة بداية البرنامج
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("تم إيقاف البوت بواسطة المستخدم")
+    except Exception as e:
+        logger.error(f"حدث خطأ غير متوقع: {str(e)}")
