@@ -52,7 +52,32 @@ except Exception as e:
     sys.exit(1)
 
 # قاموس لتخزين الصفحات المرتبطة بكل محادثة/توبيك
-topic_pages = {}
+STORAGE_FILE = 'topic_pages.json'
+
+def load_topic_pages() -> dict:
+    """
+    تحميل الروابط المخزنة بين التوبيكات والصفحات
+    """
+    if os.path.exists(STORAGE_FILE):
+        try:
+            with open(STORAGE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"خطأ في قراءة ملف التخزين: {str(e)}")
+    return {}
+
+def save_topic_pages(topic_pages: dict):
+    """
+    حفظ الروابط بين التوبيكات والصفحات
+    """
+    try:
+        with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(topic_pages, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"خطأ في حفظ ملف التخزين: {str(e)}")
+
+# تحميل الروابط المخزنة عند بدء البوت
+topic_pages = load_topic_pages()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -187,6 +212,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # تخزين الربط بين التوبيك والصفحة
         topic_pages[thread_id] = page_id
+        # حفظ التغييرات في الملف
+        save_topic_pages(topic_pages)
+        
         logger.info(f"تم ربط المحادثة/التوبيك {thread_id} بالصفحة {page_id}")
         logger.info(f"قائمة المحادثات المرتبطة: {topic_pages}")
         
@@ -256,10 +284,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # التحقق من وجود ربط للمحادثة/التوبيك
         if thread_id not in topic_pages:
             logger.info("المحادثة/التوبيك غير مرتبط بأي صفحة")
-            await message.reply_text(
-                "لم يتم ربط المحادثة بأي صفحة في Notion بعد.\n"
-                "استخدم الأمر /start لربط المحادثة بصفحة."
-            )
             return
             
         # الحصول على معرف الصفحة المرتبطة
