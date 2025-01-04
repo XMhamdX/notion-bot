@@ -1,69 +1,82 @@
-import os
-import logging
-import sys
-from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from notion_client import Client
-import json
+# استيراد المكتبات اللازمة
+import os  # للتعامل مع متغيرات البيئة ونظام التشغيل
+import logging  # لتسجيل الأحداث والأخطاء
+import sys  # للتعامل مع النظام
+from dotenv import load_dotenv  # لتحميل المتغيرات البيئية من ملف .env
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup  # مكونات واجهة تيليجرام
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes  # معالجات تيليجرام
+from notion_client import Client  # مكتبة للتعامل مع Notion API
+import json  # للتعامل مع بيانات JSON
 
-# Set up logging
+# إعداد التسجيل (Logging)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,  # مستوى التسجيل: معلومات
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # تنسيق رسائل التسجيل
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout)  # عرض السجلات في الطرفية
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  # إنشاء مسجل خاص بهذا الملف
 
-# Load environment variables
+# تحميل المتغيرات البيئية من ملف .env
 logger.info("جاري تحميل المتغيرات البيئية...")
 load_dotenv()
 
-# Initialize Notion client
-token = os.getenv("NOTION_TOKEN")
-logger.info(f"Notion token: {token[:4]}...{token[-4:]}")
-notion = Client(auth=token)
+# تهيئة عميل Notion
+token = os.getenv("NOTION_TOKEN")  # الحصول على توكن Notion من المتغيرات البيئية
+logger.info(f"Notion token: {token[:4]}...{token[-4:]}")  # طباعة جزء من التوكن للتأكد من تحميله
+notion = Client(auth=token)  # إنشاء عميل Notion
 
-# Store user's page selections
+# تخزين اختيارات المستخدمين للصفحات
+# user_id -> [page_id1, page_id2, ...]
 user_pages = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message and initialize the bot."""
+    """
+    معالج أمر /start
+    يقوم بعرض قائمة الصفحات المتاحة في Notion للمستخدم
+    
+    المعاملات:
+        update (Update): تحديث من تيليجرام يحتوي على معلومات الرسالة والمستخدم
+        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    """
     try:
         logger.info("بدء البحث عن الصفحات في Notion...")
         
-        # Try to search without filter first
+        # البحث عن جميع الصفحات في Notion
+        # ترتيب النتائج حسب آخر تعديل
         response = notion.search(
-            query="",
+            query="",  # بحث بدون كلمات مفتاحية
             sort={
-                "direction": "ascending",
-                "timestamp": "last_edited_time"
+                "direction": "ascending",  # ترتيب تصاعدي
+                "timestamp": "last_edited_time"  # حسب وقت آخر تعديل
             }
         )
         
+        # استخراج الصفحات من النتيجة
         pages = response.get("results", [])
         logger.info(f"تم العثور على {len(pages)} صفحة")
         
+        # طباعة معلومات كل صفحة في السجلات للتشخيص
         for page in pages:
             logger.info(f"معلومات الصفحة: {page.get('id')} - {page.get('url')} - {page.get('object')}")
         
-        # Create keyboard with available pages
+        # إنشاء لوحة مفاتيح تفاعلية مع أزرار للصفحات
         keyboard = []
         for page in pages:
             try:
+                # تجاهل أي شيء ليس صفحة (مثل قواعد البيانات)
                 if page.get("object") != "page":
                     continue
                     
-                # Get page info
+                # الحصول على معلومات تفصيلية عن الصفحة
                 page_info = notion.pages.retrieve(page_id=page["id"])
                 logger.info(f"معلومات تفصيلية للصفحة: {page_info}")
                 
-                # Try to get title
+                # محاولة الحصول على عنوان الصفحة
                 page_title = None
                 
-                # Try to get it from properties
+                # البحث عن العنوان في خصائص الصفحة
                 if "properties" in page_info:
                     for prop_name, prop_value in page_info["properties"].items():
                         if prop_value["type"] == "title":
@@ -72,10 +85,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 page_title = title_items[0].get("plain_text", "")
                                 break
 
-                # If still no title, use URL
+                # إذا لم نجد عنواناً، نستخدم الرابط
                 if not page_title:
                     page_title = page.get("url", "صفحة بدون عنوان").split("/")[-1]
 
+                # إضافة زر للصفحة في لوحة المفاتيح
                 page_id = page["id"]
                 logger.info(f"إضافة صفحة: {page_title} (ID: {page_id})")
                 keyboard.append([InlineKeyboardButton(page_title, callback_data=f"page_{page_id}")])
@@ -83,6 +97,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"خطأ في معالجة الصفحة: {str(e)}", exc_info=True)
                 continue
 
+        # إذا لم نجد أي صفحات، نعرض رسالة خطأ
         if not keyboard:
             error_msg = (
                 "لم يتم العثور على أي صفحات. تأكد من:\n"
@@ -95,6 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(error_msg)
             return
 
+        # إنشاء وإرسال لوحة المفاتيح التفاعلية
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             "مرحباً! الرجاء اختيار الصفحات التي تريد الوصول إليها:",
@@ -112,17 +128,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error_msg)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button presses."""
+    """
+    معالج الضغط على الأزرار في لوحة المفاتيح التفاعلية
+    يقوم بحفظ اختيار المستخدم للصفحة
+    
+    المعاملات:
+        update (Update): تحديث من تيليجرام يحتوي على معلومات الضغطة والمستخدم
+        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    """
     try:
+        # الحصول على معلومات الضغطة
         query = update.callback_query
-        await query.answer()
+        await query.answer()  # إرسال إشعار للمستخدم بأن الضغطة تم استلامها
         
+        # استخراج معرف المستخدم ومعرف الصفحة
         user_id = query.from_user.id
-        page_id = query.data.replace("page_", "")
+        page_id = query.data.replace("page_", "")  # إزالة البادئة page_ من معرف الصفحة
         
+        # إنشاء قائمة للمستخدم إذا لم تكن موجودة
         if user_id not in user_pages:
             user_pages[user_id] = []
         
+        # إضافة الصفحة لقائمة المستخدم إذا لم تكن مضافة
         if page_id not in user_pages[user_id]:
             user_pages[user_id].append(page_id)
             await query.edit_message_text(f"تم إضافة الصفحة إلى قائمة صفحاتك المتاحة!")
@@ -134,21 +161,32 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("حدث خطأ أثناء معالجة الزر!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages and add them to Notion."""
+    """
+    معالج الرسائل النصية
+    يقوم بإضافة الرسالة إلى صفحات Notion المحددة
+    
+    المعاملات:
+        update (Update): تحديث من تيليجرام يحتوي على معلومات الرسالة والمستخدم
+        context (ContextTypes.DEFAULT_TYPE): سياق المحادثة
+    """
     try:
+        # الحصول على معرف المستخدم ونص الرسالة
         user_id = update.message.from_user.id
         message_text = update.message.text
         
+        # التحقق من أن المستخدم قد اختار صفحات
         if user_id not in user_pages or not user_pages[user_id]:
             await update.message.reply_text("الرجاء اختيار صفحة أولاً باستخدام الأمر /start")
             return
         
-        # Add message to all selected pages
+        # إضافة الرسالة إلى كل الصفحات المحددة
         for page_id in user_pages[user_id]:
             try:
+                # إضافة الرسالة كفقرات في الصفحة
                 notion.blocks.children.append(
                     block_id=page_id,
                     children=[
+                        # فقرة فارغة قبل الرسالة
                         {
                             "object": "block",
                             "type": "paragraph",
@@ -156,6 +194,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "rich_text": [{"type": "text", "text": {"content": ""}}]
                             }
                         },
+                        # فقرة تحتوي على الرسالة
                         {
                             "object": "block",
                             "type": "paragraph",
@@ -163,6 +202,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "rich_text": [{"type": "text", "text": {"content": message_text}}]
                             }
                         },
+                        # فقرة فارغة بعد الرسالة
                         {
                             "object": "block",
                             "type": "paragraph",
@@ -181,26 +221,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("حدث خطأ أثناء معالجة الرسالة!")
 
 def main():
-    """Start the bot."""
+    """
+    الدالة الرئيسية لتشغيل البوت
+    تقوم بتهيئة البوت وإضافة معالجات الأوامر وتشغيل البوت
+    """
     try:
-        # Get the token
+        # الحصول على توكن البوت
         token = os.getenv("TELEGRAM_BOT_TOKEN")
         if not token:
             raise ValueError("لم يتم العثور على توكن البوت! تأكد من ملف .env")
             
-        # Create the Application
+        # إنشاء تطبيق البوت
         logger.info("جاري تهيئة البوت...")
         application = Application.builder().token(token).build()
         logger.info("تم تهيئة البوت بنجاح!")
 
-        # Add handlers
+        # إضافة معالجات الأوامر
         logger.info("جاري إضافة معالجات الأوامر...")
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CommandHandler("start", start))  # معالج أمر /start
+        application.add_handler(CallbackQueryHandler(button))  # معالج الضغط على الأزرار
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))  # معالج الرسائل النصية
         logger.info("تم إضافة معالجات الأوامر بنجاح!")
 
-        # Start the bot
+        # تشغيل البوت
         logger.info("جاري تشغيل البوت...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         logger.info("تم تشغيل البوت بنجاح!")
@@ -208,5 +251,6 @@ def main():
         logger.error(f"حدث خطأ في main: {str(e)}")
         raise e
 
+# نقطة بداية البرنامج
 if __name__ == '__main__':
     main()
