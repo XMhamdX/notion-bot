@@ -51,36 +51,49 @@ except Exception as e:
     logger.error(f"فشل الاتصال بـ Notion: {str(e)}")
     sys.exit(1)
 
-# قاموس لتخزين الصفحات المرتبطة بكل توبيك
+# قاموس لتخزين الصفحات المرتبطة بكل محادثة/توبيك
 topic_pages = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    معالج أمر /start - يستخدم لربط التوبيك بصفحة Notion
+    معالج أمر /start - يستخدم لربط التوبيك أو المحادثة بصفحة Notion
     """
     try:
         message = update.message
+        if not message:
+            return
+            
         logger.info(f"تم استلام أمر start من المستخدم {message.from_user.id}")
         
-        # التحقق من أن الرسالة في مجموعة وفي توبيك
-        if not message.chat.is_forum:
-            logger.info("المجموعة لا تدعم التوبيكات")
-            await message.reply_text("عذراً، هذا الأمر يعمل فقط في المجموعات التي تدعم التوبيكات.")
-            return
-            
-        if not message.is_topic_message:
-            logger.info("الرسالة ليست في توبيك")
-            await message.reply_text("عذراً، يجب استخدام هذا الأمر داخل توبيك.")
-            return
-            
-        # التحقق من صلاحيات المستخدم
-        user = message.from_user
-        chat_member = await context.bot.get_chat_member(message.chat.id, user.id)
-        if not chat_member.status in ['creator', 'administrator']:
-            logger.info(f"المستخدم {user.id} ليس مشرفاً")
-            await message.reply_text("عذراً، هذا الأمر متاح فقط للمشرفين.")
-            return
-            
+        # التحقق من نوع المحادثة
+        chat_type = message.chat.type
+        chat_id = str(message.chat.id)  # تحويل معرف المحادثة إلى نص
+        thread_id = str(message.message_thread_id) if message.is_topic_message else chat_id  # تحويل معرف التوبيك إلى نص
+        
+        logger.info(f"نوع المحادثة: {chat_type}")
+        logger.info(f"معرف المحادثة: {chat_id}")
+        logger.info(f"معرف التوبيك: {thread_id}")
+        
+        # في حالة المجموعة
+        if chat_type in ['group', 'supergroup']:
+            if not message.chat.is_forum:
+                logger.info("المجموعة لا تدعم التوبيكات")
+                await message.reply_text("عذراً، هذا الأمر يعمل فقط في المجموعات التي تدعم التوبيكات أو في المحادثة المباشرة مع البوت.")
+                return
+                
+            if not message.is_topic_message:
+                logger.info("الرسالة ليست في توبيك")
+                await message.reply_text("عذراً، يجب استخدام هذا الأمر داخل توبيك.")
+                return
+                
+            # التحقق من صلاحيات المستخدم في المجموعة
+            user = message.from_user
+            chat_member = await context.bot.get_chat_member(message.chat.id, user.id)
+            if not chat_member.status in ['creator', 'administrator']:
+                logger.info(f"المستخدم {user.id} ليس مشرفاً")
+                await message.reply_text("عذراً، هذا الأمر متاح فقط للمشرفين في المجموعات.")
+                return
+        
         logger.info("جاري البحث عن صفحات Notion...")
         try:
             # البحث عن الصفحات في Notion
@@ -119,7 +132,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         page_title = "صفحة بدون عنوان"
                     
                     logger.info(f"تمت إضافة صفحة: {page_title} (ID: {page_id})")
-                    callback_data = f"page_{message.message_thread_id}_{page_id}"
+                    
+                    # في حالة المجموعة، نستخدم معرف التوبيك
+                    # في حالة المحادثة المباشرة، نستخدم معرف المحادثة
+                    callback_data = f"page_{thread_id}_{page_id}"
+                    
                     keyboard.append([InlineKeyboardButton(page_title, callback_data=callback_data)])
                     
                 except Exception as e:
@@ -138,10 +155,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             reply_markup = InlineKeyboardMarkup(keyboard)
             await message.reply_text(
-                "اختر الصفحة التي تريد ربط هذا التوبيك بها:",
+                "اختر الصفحة التي تريد ربطها:",
                 reply_markup=reply_markup
             )
-            logger.info(f"تم إرسال قائمة الصفحات للمستخدم {user.id}")
+            logger.info(f"تم إرسال قائمة الصفحات للمستخدم {message.from_user.id}")
             
         except Exception as e:
             logger.error(f"خطأ في البحث عن صفحات Notion: {str(e)}")
@@ -153,75 +170,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    معالج الأزرار - يستخدم لمعالجة اختيار الصفحة
+    معالج الضغط على الأزرار
     """
     try:
         query = update.callback_query
-        await query.answer()
+        await query.answer()  # نجيب على الضغطة لإزالة علامة التحميل
         
-        # التحقق من صحة البيانات
+        logger.info(f"تم الضغط على زر: {query.data}")
+        
         if not query.data.startswith("page_"):
-            logger.error(f"بيانات غير صالحة: {query.data}")
-            await query.edit_message_text("حدث خطأ. الرجاء المحاولة مرة أخرى.")
+            logger.warning(f"نوع زر غير معروف: {query.data}")
             return
             
         # استخراج معرف التوبيك ومعرف الصفحة
-        _, topic_id, page_id = query.data.split("_")
-        topic_id = int(topic_id)
+        _, thread_id, page_id = query.data.split("_")
         
         # تخزين الربط بين التوبيك والصفحة
-        topic_pages[topic_id] = page_id
-        logger.info(f"تم ربط التوبيك {topic_id} بالصفحة {page_id}")
+        topic_pages[thread_id] = page_id
+        logger.info(f"تم ربط المحادثة/التوبيك {thread_id} بالصفحة {page_id}")
+        logger.info(f"قائمة المحادثات المرتبطة: {topic_pages}")
         
         # تحديث الرسالة
-        await query.edit_message_text(f"تم ربط هذا التوبيك بالصفحة بنجاح! يمكنك الآن إرسال الرسائل وسيتم حفظها في Notion.")
+        await query.edit_message_text("تم ربط المحادثة بالصفحة بنجاح! يمكنك الآن إرسال الرسائل وسيتم حفظها في Notion.")
         
     except Exception as e:
-        logger.error(f"خطأ في معالجة الزر: {str(e)}")
-        await query.edit_message_text("حدث خطأ أثناء ربط الصفحة. الرجاء المحاولة مرة أخرى.")
+        logger.error(f"خطأ في معالجة الضغط على الزر: {str(e)}")
+        await query.edit_message_text("حدث خطأ أثناء ربط المحادثة بالصفحة. الرجاء المحاولة مرة أخرى.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     معالجة الرسائل الواردة من المستخدمين
-    
-    Args:
-        update (Update): تحديث تيليجرام الذي يحتوي على الرسالة
-        context (ContextTypes.DEFAULT_TYPE): سياق البوت
     """
     try:
-        logger.info("تم استلام رسالة جديدة")
-        logger.info(f"نوع التحديث: {type(update)}")
-        logger.info(f"محتويات التحديث: {update.to_dict()}")
-        
         message = update.message
         if not message:
-            logger.info("لا توجد رسالة في التحديث")
             return
             
-        logger.info(f"معلومات الرسالة: {message.to_dict()}")
+        # التعامل مع المحادثات المباشرة والتوبيكات
+        chat_id = str(message.chat.id)  # تحويل معرف المحادثة إلى نص
+        thread_id = str(message.message_thread_id) if message.is_topic_message else chat_id  # تحويل معرف التوبيك إلى نص
         
-        # التحقق من أن الرسالة من توبيك
-        is_topic_message = message.is_topic_message if hasattr(message, 'is_topic_message') else False
-        logger.info(f"هل الرسالة من توبيك؟ {is_topic_message}")
+        logger.info(f"معالجة رسالة من المحادثة/التوبيك: {thread_id}")
+        logger.info(f"قائمة المحادثات المرتبطة: {topic_pages}")
         
-        if not is_topic_message:
-            logger.info("الرسالة ليست من توبيك")
-            return
-        
-        # الحصول على معرف التوبيك
-        topic_id = message.message_thread_id
-        logger.info(f"معرف التوبيك: {topic_id}")
-        
-        # التحقق من وجود التوبيك في القاموس
-        if topic_id not in topic_pages:
-            logger.info("معرف التوبيك غير مرتبط بأي صفحة")
+        # التحقق من وجود ربط للمحادثة/التوبيك
+        if thread_id not in topic_pages:
+            logger.info("المحادثة/التوبيك غير مرتبط بأي صفحة")
+            await message.reply_text(
+                "لم يتم ربط المحادثة بأي صفحة في Notion بعد.\n"
+                "استخدم الأمر /start لربط المحادثة بصفحة."
+            )
             return
             
-        logger.info(f"معرف التوبيك: {topic_id}")
-        logger.info(f"قائمة التوبيكات المرتبطة: {topic_pages}")
-        
-        # الحصول على معرف الصفحة المرتبطة بالتوبيك
-        page_id = topic_pages[topic_id]
+        # الحصول على معرف الصفحة المرتبطة
+        page_id = topic_pages[thread_id]
         logger.info(f"معرف الصفحة: {page_id}")
         
         # معالجة أنواع مختلفة من الرسائل
