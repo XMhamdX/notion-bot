@@ -197,6 +197,46 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"خطأ في معالجة الضغط على الزر: {str(e)}")
         await query.edit_message_text("حدث خطأ أثناء ربط المحادثة بالصفحة. الرجاء المحاولة مرة أخرى.")
 
+async def create_media_block(media_obj, media_type: str, caption: str = None) -> dict:
+    """
+    إنشاء بلوك وسائط لـ Notion
+    """
+    try:
+        logger.info(f"جاري إنشاء بلوك {media_type}")
+        
+        # إنشاء رابط للملف
+        message_link = f"https://t.me/c/{str(media_obj.file_unique_id)}"
+        
+        # إنشاء نص الرابط
+        link_text = f"{media_type}"
+        if caption:
+            link_text = f"{caption}\n{link_text}"
+            
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": link_text + ": ",
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": message_link,
+                            "link": {"url": message_link}
+                        }
+                    }
+                ]
+            }
+        }
+    except Exception as e:
+        logger.error(f"خطأ في إنشاء بلوك الوسائط: {str(e)}")
+        raise
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     معالجة الرسائل الواردة من المستخدمين
@@ -226,6 +266,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page_id = topic_pages[thread_id]
         logger.info(f"معرف الصفحة: {page_id}")
         
+        # إنشاء رابط للرسالة
+        chat_id_str = str(message.chat.id)[4:] if str(message.chat.id).startswith('-100') else str(message.chat.id)
+        
+        if message.is_topic_message:
+            message_link = f"https://t.me/c/{chat_id_str}/{message.message_thread_id}/{message.message_id}"
+        else:
+            message_link = f"https://t.me/c/{chat_id_str}/{message.message_id}"
+            
+        logger.info(f"رابط الرسالة: {message_link}")
+        
         # معالجة أنواع مختلفة من الرسائل
         content = None
         
@@ -237,31 +287,150 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif message.photo:
             # صورة
             logger.info("رسالة صورة")
-            content = await create_media_block(message.photo[-1], "صورة", message.caption)
+            content = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": []
+                }
+            }
+            
+            # إضافة الوصف إذا وجد
+            if message.caption:
+                content["paragraph"]["rich_text"].append({
+                    "type": "text",
+                    "text": {
+                        "content": f"{message.caption}\n",
+                    }
+                })
+            
+            # إضافة رابط الصورة
+            content["paragraph"]["rich_text"].append({
+                "type": "text",
+                "text": {
+                    "content": "صورة: ",
+                }
+            })
+            content["paragraph"]["rich_text"].append({
+                "type": "text",
+                "text": {
+                    "content": message_link,
+                    "link": {"url": message_link}
+                }
+            })
                 
         elif message.video:
             # فيديو
             logger.info("رسالة فيديو")
-            content = await create_media_block(message.video, "فيديو", message.caption)
+            content = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": []
+                }
+            }
+            
+            # إضافة الوصف إذا وجد
+            if message.caption:
+                content["paragraph"]["rich_text"].append({
+                    "type": "text",
+                    "text": {
+                        "content": f"{message.caption}\n",
+                    }
+                })
+            
+            # إضافة رابط الفيديو
+            content["paragraph"]["rich_text"].append({
+                "type": "text",
+                "text": {
+                    "content": "فيديو: ",
+                }
+            })
+            content["paragraph"]["rich_text"].append({
+                "type": "text",
+                "text": {
+                    "content": message_link,
+                    "link": {"url": message_link}
+                }
+            })
                 
         elif message.voice:
             # رسالة صوتية
             logger.info("رسالة صوتية")
-            content = await create_media_block(message.voice, "رسالة صوتية")
+            content = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": "رسالة صوتية: ",
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": message_link,
+                                "link": {"url": message_link}
+                            }
+                        }
+                    ]
+                }
+            }
                 
         elif message.audio:
             # ملف صوتي
             logger.info("ملف صوتي")
             title = message.audio.title if message.audio.title else "بدون عنوان"
             performer = message.audio.performer if message.audio.performer else "غير معروف"
-            caption = f"العنوان: {title}\nالمؤدي: {performer}"
-            content = await create_media_block(message.audio, "ملف صوتي", caption)
+            content = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": f"العنوان: {title}\nالمؤدي: {performer}\nملف صوتي: ",
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": message_link,
+                                "link": {"url": message_link}
+                            }
+                        }
+                    ]
+                }
+            }
                 
         elif message.document:
             # مستند
             logger.info("مستند")
             file_name = message.document.file_name if message.document.file_name else "بدون اسم"
-            content = await create_media_block(message.document, "مستند", f"اسم الملف: {file_name}")
+            content = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": f"اسم الملف: {file_name}\nمستند: ",
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": message_link,
+                                "link": {"url": message_link}
+                            }
+                        }
+                    ]
+                }
+            }
         
         if content:
             # إضافة المحتوى إلى Notion
@@ -323,29 +492,6 @@ async def create_text_block(text: str) -> dict:
             }]
         }
     }
-
-async def create_media_block(media_obj, media_type: str, caption: str = None) -> dict:
-    """
-    إنشاء كتلة وسائط لـ Notion
-    
-    Args:
-        media_obj: كائن الوسائط من تيليجرام
-        media_type (str): نوع الوسائط (صورة، فيديو، إلخ)
-        caption (str, optional): وصف الوسائط
-        
-    Returns:
-        dict: كتلة Notion
-    """
-    try:
-        file = await media_obj.get_file()
-        content = f"{media_type}: {file.file_path}"
-        if caption:
-            content += f"\n{caption}"
-            
-        return await create_text_block(content)
-    except Exception as e:
-        logger.error(f"خطأ في الحصول على رابط {media_type}: {str(e)}")
-        return None
 
 def main():
     """
